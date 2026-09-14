@@ -1,5 +1,5 @@
 import Gio from 'gi://Gio';
-import Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 /**
  * Actions are plain zero-argument functions that a shortcut runs when its
