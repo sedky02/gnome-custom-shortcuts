@@ -1,294 +1,236 @@
 # GNOME Custom Shortcuts
 
-> A lightweight GNOME Shell extension for creating context-aware keyboard shortcuts.
+A GNOME Shell extension that runs different actions for the same keyboard
+shortcut depending on the current desktop context.
 
-[![License](https://img.shields.io/github/license/sedky02/gnome-custom-shortcuts)](LICENSE)
-[![Build](https://img.shields.io/github/actions/workflow/status/sedky02/gnome-custom-shortcuts/ci.yml?label=build)](https://github.com/sedky02/gnome-custom-shortcuts/actions)
-[![Version](https://img.shields.io/github/v/tag/sedky02/gnome-custom-shortcuts?sort=semver)](https://github.com/sedky02/gnome-custom-shortcuts/tags)
+## What this is
 
-## Contents
+GNOME Custom Shortcuts is a small, configuration-driven engine for
+context-aware keyboard shortcuts. A shortcut is defined once as a
+combination of a key accelerator, a condition, and an action. The engine
+grabs the accelerator, checks the condition when it fires, and runs the
+action only if the condition matches.
 
-- [GNOME Custom Shortcuts](#gnome-custom-shortcuts)
-  - [Contents](#contents)
-  - [About](#about)
-  - [Why](#why)
-  - [Features](#features)
-  - [Architecture](#architecture)
-    - [`extension.js`](#extensionjs)
-    - [`shortcuts.js`](#shortcutsjs)
-    - [`actions.js`](#actionsjs)
-  - [How It Works](#how-it-works)
-  - [Getting Started](#getting-started)
-    - [Prerequisites](#prerequisites)
-    - [Installation](#installation)
-  - [Creating a Custom Shortcut](#creating-a-custom-shortcut)
-  - [Conditions](#conditions)
-    - [Desktop](#desktop)
-    - [Window](#window)
-    - [Always](#always)
-  - [Adding Actions](#adding-actions)
-  - [Roadmap](#roadmap)
-  - [Contributing](#contributing)
-  - [License](#license)
-
-## About
-
-GNOME Custom Shortcuts is a small GNOME Shell extension that adds conditional behavior to keyboard shortcuts.
-
-Instead of every shortcut being global, a shortcut can decide whether it should execute based on the current desktop context.
-
-For example:
-
-| Context            | `Alt + F4`            |
-| ------------------ | --------------------- |
-| Desktop            | Power off             |
-| Application window | Close window normally |
-
-This makes it possible to create shortcuts that are aware of where and how they are being used.
+The engine itself has no knowledge of what any specific shortcut does.
+Power-off, reboot, suspend, and lock-screen are not special-cased in the
+code — they are configuration entries built from a small set of reusable
+actions and conditions.
 
 ## Why
 
-GNOME provides a built-in custom shortcut system, but it does not provide a straightforward way to define conditions for when a shortcut should execute.
+GNOME's built-in custom shortcuts system binds one accelerator to one
+command, unconditionally, everywhere. There is no way to say "run this
+command only when I'm on the desktop, and otherwise let the normal
+shortcut behavior happen."
 
-I wanted to use `Alt + F4` as a power-off shortcut on the desktop without losing its normal behavior inside applications.
+The motivating case is `Alt + F4`:
 
-Rather than replacing the existing GNOME behavior globally, this extension checks the current context first and only handles the shortcut when its condition matches.
+| Context                        | `Alt + F4` should...     |
+| ------------------------------- | ------------------------ |
+| Desktop (no window focused)     | Power off the machine    |
+| Inside an application window    | Close the window, as usual |
 
-The result is a small configuration-driven system for building shortcuts that behave differently depending on the current state of the desktop.
+Binding `Alt + F4` globally to a power-off command would break its normal
+meaning inside every application. This extension solves that by making the
+shortcut conditional, and by only holding the accelerator grab while the
+condition can plausibly be true (see [How the engine works](#how-the-engine-works)).
 
-## Features
-
-* 🎯 **Context-aware shortcuts**
-  Execute shortcuts only when their conditions are satisfied.
-
-* ⌨️ **Custom key combinations**
-  Define your own keyboard accelerators.
-
-* 🖥️ **Desktop conditions**
-  Trigger actions specifically when working from the desktop.
-
-* 🪟 **Window conditions**
-  Restrict shortcuts to situations where an application window is focused.
-
-* 🌐 **Global shortcuts**
-  Create shortcuts that work regardless of the current context.
-
-* 🧩 **Extensible architecture**
-  Add new actions and conditions without rewriting the shortcut engine.
-
-* ⚙️ **Configuration-driven**
-  Define shortcuts in one place instead of modifying the core extension logic.
+The power-off/reboot/suspend/lock actions go through
+`Main.systemActions`, the same call GNOME Shell's own system menu makes, so
+they show the normal confirmation dialog (countdown + cancel) rather than
+acting instantly.
 
 ## Architecture
 
-The project is intentionally kept small:
-
 ```text
 custom-shortcuts@local/
-├── metadata.json
-├── extension.js
-├── shortcuts.js
-└── actions.js
+├── metadata.json     extension metadata (uuid, shell version)
+├── extension.js       the engine: grabs accelerators, dispatches to actions
+├── shortcuts.js        configuration: name + accelerator + condition + action
+├── actions.js          reusable action implementations
+└── conditions.js       reusable condition implementations
 ```
-
-### `extension.js`
-
-The core shortcut engine.
-
-It is responsible for registering keyboard accelerators, receiving shortcut events, evaluating conditions, executing actions, and cleaning up when the extension is disabled.
-
-### `shortcuts.js`
-
-The shortcut configuration.
-
-This is where shortcuts are defined by specifying their name, keyboard combination, condition, and action.
-
-Adding a shortcut should normally only require changing this file.
-
-### `actions.js`
-
-Contains the actions that can be executed by shortcuts.
-
-Keeping actions separate from shortcut definitions makes them reusable and keeps the core shortcut engine independent from specific commands.
-
-## How It Works
-
-The extension sits between the keyboard event and the configured action:
 
 ```text
-Keyboard input
-      │
-      ▼
-GNOME Shell
-      │
-      ▼
-Shortcut Engine
-      │
-      ▼
-Condition check
-   ┌──┴──┐
-   │     │
-  No    Yes
-   │     │
-   ▼     ▼
-Ignore  Action
-         │
-         ▼
-      Execute
+shortcuts.js
+   │  list of { name, accelerator, condition, action }
+   ▼
+extension.js (engine)
+   │  grabs/releases accelerators based on each condition
+   │  on activation: re-checks condition, then runs the action
+   ▼
+actions.js              conditions.js
+   (what runs)            (when it's allowed to run)
 ```
 
-For `Alt + F4`:
+`extension.js` never mentions "power off," "desktop," or any other
+concrete behavior. It only understands the shapes of an action (a
+zero-argument function) and a condition (an object with `matches()` and
+an optional `watch()`). Everything else is data.
+
+## How the engine works
+
+Grabbing an accelerator with GNOME's `Meta.Display.grab_accelerator` takes
+it over at the compositor level: while grabbed, the key press never
+reaches the focused application, no matter what happens afterward. So the
+naive approach — grab `Alt+F4` globally and only run the power-off command
+if a condition check passes — does not work. It would still swallow every
+application's `Alt+F4`, because GNOME would never hand the key event back.
+
+Instead, each shortcut's accelerator is grabbed only while its condition
+currently evaluates to true, and released the moment it stops being true:
 
 ```text
-                    Alt + F4
-                       │
-             ┌─────────┴─────────┐
-             │                   │
-          Desktop            Application
-             │                   │
-             ▼                   ▼
-         Power off          Do nothing
-                                 │
-                                 ▼
-                         Application handles
-                            Alt + F4
+Alt + F4 pressed
+        │
+        ▼
+Is the accelerator currently grabbed?
+        │
+  ┌─────┴─────┐
+  │           │
+ No          Yes  (condition held at grab time)
+  │           │
+  ▼           ▼
+Application  Re-check condition
+handles it          │
+             ┌──────┴──────┐
+             │             │
+            No            Yes
+             │             │
+             ▼             ▼
+       (does not fire — action runs
+        should not
+        happen)
 ```
 
-## Getting Started
+Conditions that depend on focus state (`desktop`, `window`) subscribe to
+GNOME's focus-window signal via their `watch()` method. Whenever focus
+changes, the engine re-evaluates that condition and grabs or releases the
+accelerator accordingly:
 
-### Prerequisites
+* No window focused → `desktop` condition becomes true → `Alt+F4` is
+  grabbed → pressing it powers off the machine.
+* A window gains focus → `desktop` condition becomes false → `Alt+F4` is
+  released → GNOME delivers the key press to the application as normal.
 
-You need:
+Conditions that don't change over time (`always`) simply omit `watch()`
+and stay grabbed for the extension's lifetime.
+
+The condition is checked twice — once to decide whether to hold the grab,
+and again right when the accelerator fires — as a safety margin against
+focus changing in the brief window between the two.
+
+## Prerequisites
 
 * GNOME Shell 50
-* A Linux system running GNOME
-* `gnome-extensions` available on your system
-* A terminal
+* A Linux desktop running GNOME
+* The `gnome-extensions` command-line tool
 
-The extension is currently developed and tested for GNOME Shell 50.
-
-### Installation
-
-Clone the repository:
+## Installation
 
 ```bash
 git clone https://github.com/sedky02/gnome-custom-shortcuts.git
-cd gnome-custom-shortcuts
-```
-
-Create the local GNOME extension directory:
-
-```bash
 mkdir -p ~/.local/share/gnome-shell/extensions/custom-shortcuts@local
-```
-
-Copy the extension files:
-
-```bash
-cp metadata.json extension.js shortcuts.js actions.js \
+cp gnome-custom-shortcuts/{metadata.json,extension.js,shortcuts.js,actions.js,conditions.js} \
   ~/.local/share/gnome-shell/extensions/custom-shortcuts@local/
-```
-
-Enable the extension:
-
-```bash
 gnome-extensions enable custom-shortcuts@local
 ```
 
-Verify that it is enabled:
+On Wayland sessions, log out and back in after enabling so GNOME Shell
+picks up the extension. Verify it loaded:
 
 ```bash
-gnome-extensions list | grep custom-shortcuts
+gnome-extensions info custom-shortcuts@local
 ```
 
-## Creating a Custom Shortcut
+## Adding a shortcut
 
-Custom shortcuts are defined in `shortcuts.js`.
+Open `shortcuts.js` and add an entry to the `shortcuts` array, referencing
+an existing action and condition:
 
-Each shortcut consists of:
+```js
+{
+    name: 'Suspend from desktop',
+    accelerator: '<Super><Alt>s',
+    condition: conditions.desktop,
+    action: actions.suspend,
+},
+```
 
-| Property      | Purpose                          |
-| ------------- | -------------------------------- |
-| `name`        | Identifies the shortcut          |
-| `accelerator` | Defines the keyboard combination |
-| `condition`   | Controls when it can execute     |
-| `action`      | Defines what it executes         |
-
-For example, a shortcut can be configured to run only on the desktop.
-
-After changing the configuration, reload the extension:
+Reload the extension for the change to take effect:
 
 ```bash
 gnome-extensions disable custom-shortcuts@local
 gnome-extensions enable custom-shortcuts@local
 ```
 
-The new shortcut will then be registered by GNOME Shell.
+No other file needs to change. This holds whether you're adding the 5th
+shortcut or the 50th.
 
-## Conditions
+## Adding an action
 
-### Desktop
+Add a function to the `actions` object in `actions.js`. Zero-argument
+actions can be used directly; actions that need a parameter should be
+factories that return a zero-argument function, so every entry in
+`shortcuts.js` stays uniform:
 
-The shortcut executes only when the desktop is focused.
+```js
+export const actions = {
+    // ...
+    openTerminal: () => runCommand(['gnome-terminal']),
+    runShellCommand: (commandLine) => () => runCommand(['/bin/sh', '-c', commandLine]),
+};
+```
 
-Useful for shortcuts such as:
+Use it in `shortcuts.js` as `action: actions.openTerminal` or
+`action: actions.runShellCommand('some-command --flag')`.
 
-* Power off
-* Reboot
-* Suspend
-* Launch desktop utilities
+All process execution should go through the shared `runCommand` helper in
+`actions.js` rather than duplicating subprocess logic.
 
-### Window
+## Adding a condition
 
-The shortcut executes only when an application window is focused.
+Add an entry to the `conditions` object in `conditions.js`. At minimum it
+needs a `matches()` function returning a boolean:
 
-This can be useful for shortcuts that should only apply while working inside applications.
+```js
+export const conditions = {
+    // ...
+    fullscreenWindow: {
+        matches: () => global.display.focus_window?.is_fullscreen() ?? false,
+    },
+};
+```
 
-### Always
+If the condition can change while a shortcut is grabbed (like focus-based
+conditions), also provide `watch(reevaluate)`: subscribe to the relevant
+GNOME signal, call `reevaluate` when it fires, and return an unsubscribe
+function. Conditions that never change, like `always`, can omit `watch`.
 
-The shortcut executes regardless of the current context.
+## Debugging
 
-This is useful for actions that should always be available.
+Watch extension logs while GNOME Shell runs (Wayland):
 
-## Adding Actions
+```bash
+journalctl -f -o cat /usr/bin/gnome-shell
+```
 
-Actions are kept separately from shortcut definitions.
+Or, on nested/X11 test sessions, run a nested Shell instance:
 
-This allows the same action to be assigned to multiple shortcuts and keeps system commands out of the shortcut engine itself.
+```bash
+dbus-run-session -- gnome-shell --nested --wayland
+```
 
-Actions can be used for things such as:
+`console.warn` and `logError` calls in this extension are prefixed with
+`custom-shortcuts:` to make them easy to filter for.
 
-* Launching applications
-* Running shell commands
-* Power management
-* Starting scripts
-* Opening development tools
-* Triggering custom workflows
+## Uninstalling
 
-## Roadmap
-
-Some possible future improvements:
-
-* Application-specific conditions
-* Workspace-specific conditions
-* Fullscreen conditions
-* More window-state conditions
-* Easier configuration
-* Better extension management
-* Additional built-in actions
-
-The architecture is intentionally kept flexible so these features can be added without turning the project into a large framework.
-
-## Contributing
-
-Issues, ideas, and pull requests are welcome.
-
-If you have an idea for a useful condition or action, feel free to open an issue or contribute an implementation.
+```bash
+gnome-extensions disable custom-shortcuts@local
+rm -rf ~/.local/share/gnome-shell/extensions/custom-shortcuts@local
+```
 
 ## License
 
-This project is licensed under the MIT License.
-
----
-
-Made with ❤️ by [sedky02](https://github.com/sedky02)
+MIT. See [LICENSE](LICENSE).

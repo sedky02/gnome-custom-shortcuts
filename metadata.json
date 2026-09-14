@@ -1,0 +1,7 @@
+{
+    "uuid": "custom-shortcuts@local",
+    "name": "Custom Shortcuts",
+    "description": "A configuration-driven engine for context-aware keyboard shortcuts. Ships with a desktop-only Alt+F4 power-off as its first example.",
+    "shell-version": ["50"],
+    "url": "https://github.com/sedky02/gnome-custom-shortcuts"
+}
